@@ -2,8 +2,11 @@
 <html lang="ru">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
-<meta name="theme-color" content="#16130b">
+<meta
+  name="viewport"
+  content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover"
+>
+<meta name="theme-color" content="#17150c">
 <title>Backrooms: The Beginning</title>
 
 <style>
@@ -176,12 +179,11 @@ button:disabled{
   top:50%;
   left:50%;
   display:none;
-  width:min(80vw,400px);
+  width:min(80vw,420px);
   padding:18px;
   border:1px solid rgba(255,255,255,.35);
   border-radius:12px;
-  background:rgba(0,0,0,.72);
-  font-size:16px;
+  background:rgba(0,0,0,.74);
   font-weight:800;
   text-align:center;
   transform:translate(-50%,-50%);
@@ -658,12 +660,28 @@ button:disabled{
 
     <div class="row">
       <label for="volumeRange">ГРОМКОСТЬ</label>
-      <input id="volumeRange" class="range" type="range" min="0" max="1" step="0.01" value="0.75">
+      <input
+        id="volumeRange"
+        class="range"
+        type="range"
+        min="0"
+        max="1"
+        step="0.01"
+        value="0.75"
+      >
     </div>
 
     <div class="row">
       <label for="sensitivityRange">ЧУВСТВИТЕЛЬНОСТЬ</label>
-      <input id="sensitivityRange" class="range" type="range" min="0.001" max="0.006" step="0.0002" value="0.0024">
+      <input
+        id="sensitivityRange"
+        class="range"
+        type="range"
+        min="0.001"
+        max="0.006"
+        step="0.0002"
+        value="0.0024"
+      >
     </div>
 
     <div class="row">
@@ -685,8 +703,8 @@ button:disabled{
     <h2>ОБ ИГРЕ</h2>
 
     <p>
-      Backrooms: The Beginning — Level 0. Активируйте четыре энергетических
-      модуля, избегайте The Walker и откройте металлическую дверь.
+      Активируйте четыре энергетических модуля, избегайте The Walker
+      и откройте металлическую дверь.
     </p>
 
     <p class="small">
@@ -726,7 +744,7 @@ import {clone as cloneSkeleton} from "three/addons/utils/SkeletonUtils.js";
 const $=selector=>document.querySelector(selector);
 const $$=selector=>[...document.querySelectorAll(selector)];
 
-const SAVE_KEY="backrooms_the_beginning_level0_wide_map_v1";
+const SAVE_KEY="backrooms_the_beginning_level0_walker_collision_v1";
 
 const isMobile=
   /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)||
@@ -925,6 +943,12 @@ let walkerMixer=null;
 let walkerActions={};
 let walkerState="hidden";
 
+let walkerLastDirection=
+  new THREE.Vector3(0,0,1);
+
+let walkerAvoidDirection=0;
+let walkerAvoidTimer=0;
+
 let doorPivot=null;
 let doorObject=null;
 let panelObject=null;
@@ -969,6 +993,7 @@ let toastTimer=null;
 let checkpointIndex=0;
 
 const playerRadius=.22;
+const walkerRadius=.36;
 const eyeHeight=1.7;
 
 const modulePositions=[
@@ -1239,7 +1264,6 @@ function initRenderer(){
 function prepareTexture(texture,repeatX=2,repeatY=2){
   texture.wrapS=THREE.RepeatWrapping;
   texture.wrapT=THREE.RepeatWrapping;
-
   texture.repeat.set(repeatX,repeatY);
   texture.colorSpace=THREE.SRGBColorSpace;
   texture.anisotropy=isMobile?2:4;
@@ -1829,10 +1853,7 @@ function buildLevel(){
   );
 
   panelObject.rotation.y=Math.PI;
-
-  panelObject.userData={
-    type:"panel"
-  };
+  panelObject.userData={type:"panel"};
 
   prepareModel(panelObject);
 
@@ -1861,10 +1882,7 @@ function buildLevel(){
   );
 
   doorObject.rotation.y=Math.PI;
-
-  doorObject.userData={
-    type:"door"
-  };
+  doorObject.userData={type:"door"};
 
   prepareModel(doorObject);
 
@@ -1907,6 +1925,7 @@ function playWalkerAnimation(animationName,loop=true){
     walkerActions[animationName];
 
   if(!nextAction){
+    console.warn("Анимация не найдена:",animationName);
     return;
   }
 
@@ -2032,13 +2051,13 @@ function resetNewGame(){
   saveGame();
 }
 
-function collidesWithWall(x,z){
+function collidesWithWall(x,z,radius=playerRadius){
   for(const wall of walls){
     if(
-      x+playerRadius>wall.minX&&
-      x-playerRadius<wall.maxX&&
-      z+playerRadius>wall.minZ&&
-      z-playerRadius<wall.maxZ
+      x+radius>wall.minX&&
+      x-radius<wall.maxX&&
+      z+radius>wall.minZ&&
+      z-radius<wall.maxZ
     ){
       return true;
     }
@@ -2074,7 +2093,7 @@ function findSafeSpawn(){
   );
 }
 
-async function startLevel(fromSave=false){
+async function startLevel(){
   await unlockAudio();
 
   if(!gameReady){
@@ -2263,7 +2282,7 @@ async function finishIntro(){
             :"menu"
         );
       }else{
-        await startLevel(false);
+        await startLevel();
       }
     }finally{
       introFinishing=false;
@@ -2323,7 +2342,7 @@ function beginContinue(event){
   loadSave();
   state.started=true;
 
-  startLevel(true)
+  startLevel()
     .catch(error=>{
       console.error(error);
       showToast("НЕ УДАЛОСЬ ЗАПУСТИТЬ ИГРУ");
@@ -2388,7 +2407,7 @@ $("#retryBtn").addEventListener("click",async()=>{
     await loadAllAssets();
 
   if(loaded){
-    await startLevel(true);
+    await startLevel();
   }
 });
 
@@ -2801,16 +2820,9 @@ function toggleFlashlight(){
   );
 }
 
-function collides(x,z){
-  for(const wall of walls){
-    if(
-      x+playerRadius>wall.minX&&
-      x-playerRadius<wall.maxX&&
-      z+playerRadius>wall.minZ&&
-      z-playerRadius<wall.maxZ
-    ){
-      return true;
-    }
+function playerCollides(x,z){
+  if(collidesWithWall(x,z,playerRadius)){
+    return true;
   }
 
   for(const moduleObject of moduleObjects){
@@ -2922,7 +2934,7 @@ function updatePlayer(deltaTime){
     moveX;
 
   if(
-    !collides(
+    !playerCollides(
       proposedX,
       camera.position.z
     )
@@ -2935,7 +2947,7 @@ function updatePlayer(deltaTime){
     moveZ;
 
   if(
-    !collides(
+    !playerCollides(
       camera.position.x,
       proposedZ
     )
@@ -3219,6 +3231,19 @@ function handleModuleCount(activatedCount){
       -10
     );
 
+    if(
+      walkerCollides(
+        walker.position.x,
+        walker.position.z
+      )
+    ){
+      walker.position.set(
+        15,
+        0,
+        -18
+      );
+    }
+
     walkerState="walk";
 
     playWalkerAnimation("Walk");
@@ -3339,6 +3364,255 @@ function flashlightHitsWalker(){
   return wallHits.length===0;
 }
 
+function walkerCollides(x,z){
+  return collidesWithWall(
+    x,
+    z,
+    walkerRadius
+  );
+}
+
+function hasClearPathToPlayer(){
+  if(
+    !walker||
+    !camera
+  ){
+    return false;
+  }
+
+  const start=
+    walker.position
+      .clone()
+      .add(
+        new THREE.Vector3(
+          0,
+          1,
+          0
+        )
+      );
+
+  const end=
+    camera.position.clone();
+
+  const direction=
+    end
+      .clone()
+      .sub(start);
+
+  const distance=
+    direction.length();
+
+  if(distance<=.01){
+    return true;
+  }
+
+  direction.normalize();
+
+  const raycaster=
+    new THREE.Raycaster(
+      start,
+      direction,
+      0,
+      distance
+    );
+
+  const wallHits=
+    raycaster.intersectObjects(
+      walls.map(wall=>wall.mesh),
+      false
+    );
+
+  return wallHits.length===0;
+}
+
+function tryWalkerStep(direction,distance){
+  const nextX=
+    walker.position.x+
+    direction.x*
+    distance;
+
+  const nextZ=
+    walker.position.z+
+    direction.z*
+    distance;
+
+  let moved=false;
+
+  if(
+    !walkerCollides(
+      nextX,
+      walker.position.z
+    )
+  ){
+    walker.position.x=nextX;
+    moved=true;
+  }
+
+  if(
+    !walkerCollides(
+      walker.position.x,
+      nextZ
+    )
+  ){
+    walker.position.z=nextZ;
+    moved=true;
+  }
+
+  return moved;
+}
+
+function moveWalkerWithCollisions(direction,speed,deltaTime){
+  const stepDistance=
+    speed*
+    deltaTime;
+
+  if(
+    direction.lengthSq()<=.0001
+  ){
+    return;
+  }
+
+  direction.normalize();
+
+  walkerLastDirection.copy(direction);
+
+  if(
+    walkerAvoidTimer>0
+  ){
+    walkerAvoidTimer-=deltaTime;
+
+    const sideDirection=
+      new THREE.Vector3(
+        direction.z*
+        walkerAvoidDirection,
+        0,
+        -direction.x*
+        walkerAvoidDirection
+      );
+
+    if(
+      tryWalkerStep(
+        sideDirection,
+        stepDistance
+      )
+    ){
+      walkerLastDirection.copy(
+        sideDirection
+      );
+
+      return;
+    }
+
+    walkerAvoidTimer=0;
+  }
+
+  if(
+    tryWalkerStep(
+      direction,
+      stepDistance
+    )
+  ){
+    return;
+  }
+
+  const leftDirection=
+    new THREE.Vector3(
+      -direction.z,
+      0,
+      direction.x
+    );
+
+  const rightDirection=
+    new THREE.Vector3(
+      direction.z,
+      0,
+      -direction.x
+    );
+
+  const probeDistance=
+    Math.max(
+      stepDistance,
+      .12
+    );
+
+  const leftClear=
+    !walkerCollides(
+      walker.position.x+
+      leftDirection.x*
+      probeDistance,
+
+      walker.position.z+
+      leftDirection.z*
+      probeDistance
+    );
+
+  const rightClear=
+    !walkerCollides(
+      walker.position.x+
+      rightDirection.x*
+      probeDistance,
+
+      walker.position.z+
+      rightDirection.z*
+      probeDistance
+    );
+
+  if(leftClear&&!rightClear){
+    walkerAvoidDirection=1;
+    walkerAvoidTimer=.8;
+
+    tryWalkerStep(
+      leftDirection,
+      stepDistance
+    );
+
+    walkerLastDirection.copy(
+      leftDirection
+    );
+
+    return;
+  }
+
+  if(rightClear&&!leftClear){
+    walkerAvoidDirection=-1;
+    walkerAvoidTimer=.8;
+
+    tryWalkerStep(
+      rightDirection,
+      stepDistance
+    );
+
+    walkerLastDirection.copy(
+      rightDirection
+    );
+
+    return;
+  }
+
+  if(leftClear&&rightClear){
+    walkerAvoidDirection=
+      Math.random()<.5
+        ?1
+        :-1;
+
+    walkerAvoidTimer=.8;
+
+    const chosenDirection=
+      walkerAvoidDirection===1
+        ?leftDirection
+        :rightDirection;
+
+    tryWalkerStep(
+      chosenDirection,
+      stepDistance
+    );
+
+    walkerLastDirection.copy(
+      chosenDirection
+    );
+  }
+}
+
 function updateWalker(deltaTime){
   if(
     !walker||
@@ -3415,12 +3689,12 @@ function updateWalker(deltaTime){
       .clone()
       .sub(walker.position);
 
-  const distance=
+  const distanceToPlayer=
     direction.length();
 
   if(
     walkerState==="walk"&&
-    distance>15
+    distanceToPlayer>15
   ){
     const patrolTime=
       performance.now()*.00015;
@@ -3433,25 +3707,39 @@ function updateWalker(deltaTime){
   }
 
   direction.y=0;
-  direction.normalize();
 
-  walker.position.addScaledVector(
-    direction,
-    speed*deltaTime
-  );
+  if(direction.lengthSq()>.0001){
+    direction.normalize();
 
-  walker.lookAt(
-    camera.position.x,
-    walker.position.y,
-    camera.position.z
-  );
+    moveWalkerWithCollisions(
+      direction,
+      speed,
+      deltaTime
+    );
+  }
+
+  if(
+    walkerLastDirection.lengthSq()>.0001
+  ){
+    walker.lookAt(
+      walker.position.x+
+      walkerLastDirection.x,
+
+      walker.position.y,
+
+      walker.position.z+
+      walkerLastDirection.z
+    );
+  }
 
   walkerFootTimer-=deltaTime;
 
   if(walkerFootTimer<=0){
     playSound(
       "Walker’s steps.mp3",
-      distance<12?.48:.22
+      distanceToPlayer<12
+        ?.48
+        :.22
     );
 
     walkerFootTimer=
@@ -3460,7 +3748,7 @@ function updateWalker(deltaTime){
         :.72;
   }
 
-  if(distance<8){
+  if(distanceToPlayer<8){
     walkerBreathTimer-=deltaTime;
 
     if(walkerBreathTimer<=0){
@@ -3473,7 +3761,10 @@ function updateWalker(deltaTime){
     }
   }
 
-  if(distance<1.15){
+  if(
+    distanceToPlayer<1.15&&
+    hasClearPathToPlayer()
+  ){
     attackPlayer();
   }
 }
@@ -3576,6 +3867,19 @@ function respawnPlayer(){
     0,
     -16
   );
+
+  if(
+    walkerCollides(
+      walker.position.x,
+      walker.position.z
+    )
+  ){
+    walker.position.set(
+      4,
+      0,
+      -16
+    );
+  }
 
   const activatedCount=
     state.modules.filter(Boolean).length;
