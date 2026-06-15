@@ -179,11 +179,11 @@ button:disabled{
   top:50%;
   left:50%;
   display:none;
-  width:min(80vw,420px);
+  width:min(82vw,430px);
   padding:18px;
   border:1px solid rgba(255,255,255,.35);
   border-radius:12px;
-  background:rgba(0,0,0,.74);
+  background:rgba(0,0,0,.76);
   font-weight:800;
   text-align:center;
   transform:translate(-50%,-50%);
@@ -382,8 +382,8 @@ button:disabled{
   pointer-events:none;
   background:repeating-linear-gradient(
     0deg,
-    rgba(255,255,255,.16) 0 2px,
-    rgba(0,0,0,.25) 2px 5px
+    rgba(255,255,255,.17) 0 2px,
+    rgba(0,0,0,.26) 2px 5px
   );
   mix-blend-mode:screen;
   animation:shake .06s infinite;
@@ -740,7 +740,8 @@ import {clone as cloneSkeleton} from "three/addons/utils/SkeletonUtils.js";
 const $=selector=>document.querySelector(selector);
 const $$=selector=>[...document.querySelectorAll(selector)];
 
-const SAVE_KEY="backrooms_the_beginning_visible_modules_v2";
+const SAVE_KEY="backrooms_the_beginning_level0_save";
+const SETTINGS_KEY="backrooms_the_beginning_settings";
 
 const isMobile=
   /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)||
@@ -791,8 +792,141 @@ const FILES={
 const assetURL=filename=>encodeURI("./"+filename);
 const screens=$$(".screen");
 
+const SAFE_SPAWN={
+  x:0,
+  y:1.7,
+  z:20
+};
+
+const DEFAULT_STATE=()=>({
+  started:false,
+  completed:false,
+  modules:[false,false,false,false],
+  battery:100,
+  flashlightOn:false,
+  doorUnlocked:false,
+  doorOpen:false,
+  player:{...SAFE_SPAWN},
+  checkpoint:{...SAFE_SPAWN}
+});
+
+let settings={
+  volume:.75,
+  sensitivity:.0024,
+  quality:"auto"
+};
+
+let state=DEFAULT_STATE();
+
+let renderer=null;
+let scene=null;
+let camera=null;
+let worldGroup=null;
+
+let textureAssets={};
+let modelAssets={};
+let audioBuffers={};
+
+let audioContext=null;
+let masterGain=null;
+let levelHumSource=null;
+
+const activeAudioSources=new Set();
+const runTimers=new Set();
+
+let walls=[];
+let interactables=[];
+let moduleObjects=[];
+
+let walker=null;
+let walkerMixer=null;
+let walkerActions={};
+let walkerState="hidden";
+let walkerPreviousState="hidden";
+
+let walkerLastDirection=
+  new THREE.Vector3(0,0,1);
+
+let doorAssembly=null;
+let doorHinge=null;
+let doorLeaf=null;
+let doorFrame=null;
+let doorOpenProgress=0;
+let doorOpening=false;
+
+let initialDoorAssemblyPosition=null;
+let initialDoorAssemblyRotation=null;
+let initialDoorHingePosition=null;
+let initialDoorHingeRotation=null;
+let initialDoorLeafPosition=null;
+let initialDoorLeafRotation=null;
+
+let panelObject=null;
+
+let gameReady=false;
+let loadingNow=false;
+let playing=false;
+let paused=false;
+let attacking=false;
+
+let watchingIntroOnly=false;
+let newGameStarting=false;
+let continueStarting=false;
+let introFinishing=false;
+
+let yaw=Math.PI;
+let pitch=0;
+
+let keys={};
+let runHeld=false;
+
+let moveInput={
+  x:0,
+  z:0
+};
+
+let stamina=100;
+let bob=0;
+
+let footTimer=0;
+let walkerFootTimer=0;
+let playerBreathTimer=0;
+let walkerBreathTimer=0;
+let freezeReleaseTimer=0;
+
+let currentInteractable=null;
+let toastTimer=null;
+let checkpointIndex=0;
+
+const playerRadius=.22;
+const walkerRadius=.36;
+const eyeHeight=1.7;
+
+const modulePositions=[
+  [-18,0,-18],
+  [18,0,-18],
+  [-18,0,16],
+  [18,0,16]
+];
+
+const walkerSpawn=
+  new THREE.Vector3(0,0,-18);
+
+const exitPosition=
+  new THREE.Vector3(0,0,-25);
+
+const checkpoints=[
+  new THREE.Vector3(0,1.7,20),
+  new THREE.Vector3(-14,1.7,8),
+  new THREE.Vector3(14,1.7,8),
+  new THREE.Vector3(-14,1.7,-10),
+  new THREE.Vector3(14,1.7,-10)
+];
+
 function showScreen(id){
-  screens.forEach(screen=>screen.classList.remove("active"));
+  screens.forEach(screen=>{
+    screen.classList.remove("active");
+  });
 
   if(!id){
     return;
@@ -819,87 +953,115 @@ function removeFadeImmediately(){
 function fadeTo(callback){
   $("#fade").classList.add("on");
 
-  setTimeout(async()=>{
+  schedule(async()=>{
     await callback();
 
-    setTimeout(()=>{
+    schedule(()=>{
       $("#fade").classList.remove("on");
     },100);
   },650);
 }
 
-const SAFE_SPAWN={
-  x:0,
-  y:1.7,
-  z:20
-};
+function schedule(callback,delay){
+  const id=setTimeout(()=>{
+    runTimers.delete(id);
+    callback();
+  },delay);
 
-let settings={
-  volume:.75,
-  sensitivity:.0024,
-  quality:"auto"
-};
+  runTimers.add(id);
 
-let state={
-  started:false,
-  completed:false,
-  modules:[false,false,false,false],
-  battery:100,
-  doorUnlocked:false,
+  return id;
+}
 
-  player:{
-    ...SAFE_SPAWN
-  },
-
-  checkpoint:{
-    ...SAFE_SPAWN
+function clearRunTimers(){
+  for(const id of runTimers){
+    clearTimeout(id);
   }
-};
 
-function loadSave(){
+  runTimers.clear();
+
+  if(toastTimer){
+    clearTimeout(toastTimer);
+    toastTimer=null;
+  }
+}
+
+function loadSettings(){
   try{
-    const raw=localStorage.getItem(SAVE_KEY);
+    const raw=localStorage.getItem(SETTINGS_KEY);
 
     if(raw){
-      const saved=JSON.parse(raw);
-
-      state={
-        ...state,
-        ...saved,
-
-        player:{
-          ...state.player,
-          ...(saved.player||{})
-        },
-
-        checkpoint:{
-          ...state.checkpoint,
-          ...(saved.checkpoint||{})
-        }
-      };
-
       settings={
         ...settings,
-        ...(saved.settings||{})
+        ...JSON.parse(raw)
       };
     }
   }catch(error){
-    console.error("Ошибка чтения сохранения:",error);
+    console.error("Ошибка настроек:",error);
   }
-
-  const hasSave=Boolean(localStorage.getItem(SAVE_KEY));
-
-  $("#continueBtn").disabled=
-    !hasSave||
-    state.completed;
 
   $("#volumeRange").value=settings.volume;
   $("#sensitivityRange").value=settings.sensitivity;
   $("#qualitySelect").value=settings.quality;
 }
 
-function saveGame(){
-  state.settings=settings;
+function saveSettings(){
+  try{
+    localStorage.setItem(
+      SETTINGS_KEY,
+      JSON.stringify(settings)
+    );
+  }catch(error){
+    console.error("Ошибка сохранения настроек:",error);
+  }
+}
+
+function loadProgress(){
+  try{
+    const raw=localStorage.getItem(SAVE_KEY);
+
+    if(!raw){
+      return false;
+    }
+
+    const saved=JSON.parse(raw);
+
+    state={
+      ...DEFAULT_STATE(),
+      ...saved,
+      modules:Array.isArray(saved.modules)
+        ?saved.modules.slice(0,4)
+        :[false,false,false,false],
+      player:{
+        ...SAFE_SPAWN,
+        ...(saved.player||{})
+      },
+      checkpoint:{
+        ...SAFE_SPAWN,
+        ...(saved.checkpoint||{})
+      }
+    };
+
+    while(state.modules.length<4){
+      state.modules.push(false);
+    }
+
+    return true;
+  }catch(error){
+    console.error("Ошибка чтения сохранения:",error);
+    return false;
+  }
+}
+
+function saveProgress(){
+  state.player={
+    x:camera?.position.x??state.player.x,
+    y:eyeHeight,
+    z:camera?.position.z??state.player.z
+  };
+
+  state.doorOpen=
+    doorOpenProgress>=.98;
 
   try{
     localStorage.setItem(
@@ -907,111 +1069,32 @@ function saveGame(){
       JSON.stringify(state)
     );
   }catch(error){
-    console.error("Ошибка сохранения:",error);
+    console.error("Ошибка сохранения игры:",error);
   }
 
-  $("#continueBtn").disabled=false;
+  updateContinueButton();
 }
 
-loadSave();
+function updateContinueButton(){
+  const raw=localStorage.getItem(SAVE_KEY);
 
-let renderer=null;
-let scene=null;
-let camera=null;
-let worldGroup=null;
+  if(!raw){
+    $("#continueBtn").disabled=true;
+    return;
+  }
 
-let textureAssets={};
-let modelAssets={};
-let audioBuffers={};
+  try{
+    const saved=JSON.parse(raw);
 
-let audioContext=null;
-let masterGain=null;
-let levelHumSource=null;
+    $("#continueBtn").disabled=
+      Boolean(saved.completed);
+  }catch(error){
+    $("#continueBtn").disabled=true;
+  }
+}
 
-const activeAudioSources=new Set();
-
-let walls=[];
-let interactables=[];
-let moduleObjects=[];
-
-let walker=null;
-let walkerMixer=null;
-let walkerActions={};
-let walkerState="hidden";
-
-let walkerLastDirection=
-  new THREE.Vector3(0,0,1);
-
-let walkerAvoidDirection=0;
-let walkerAvoidTimer=0;
-
-let doorPivot=null;
-let doorObject=null;
-let panelObject=null;
-
-let gameReady=false;
-let loadingNow=false;
-
-let playing=false;
-let paused=false;
-let attacking=false;
-
-let watchingIntroOnly=false;
-let newGameStarting=false;
-let continueStarting=false;
-let introFinishing=false;
-
-let yaw=0;
-let pitch=0;
-
-let keys={};
-let runHeld=false;
-
-let moveInput={
-  x:0,
-  z:0
-};
-
-let stamina=100;
-let bob=0;
-
-let footTimer=0;
-let walkerFootTimer=0;
-
-let playerBreathTimer=0;
-let walkerBreathTimer=0;
-
-let freezeReleaseTimer=0;
-let doorOpenAmount=0;
-
-let currentInteractable=null;
-let toastTimer=null;
-let checkpointIndex=0;
-
-const playerRadius=.22;
-const walkerRadius=.36;
-const eyeHeight=1.7;
-
-const modulePositions=[
-  [-18,0,-18],
-  [18,0,-18],
-  [-18,0,16],
-  [18,0,16]
-];
-
-const exitPosition=
-  new THREE.Vector3(0,0,-24);
-
-const walkerSpawn=
-  new THREE.Vector3(0,0,-18);
-
-const checkpoints=[
-  new THREE.Vector3(0,1.7,20),
-  new THREE.Vector3(-14,1.7,8),
-  new THREE.Vector3(14,1.7,8),
-  new THREE.Vector3(-14,1.7,-10),
-  new THREE.Vector3(14,1.7,-10)
-];
+loadSettings();
+updateContinueButton();
 
 async function unlockAudio(){
   try{
@@ -1111,7 +1194,13 @@ function stopSound(sound){
   sound.stopped=true;
 
   try{
-    sound.source.stop();
+    sound.source.stop(0);
+  }catch(error){
+  }
+
+  try{
+    sound.source.disconnect();
+    sound.gain.disconnect();
   }catch(error){
   }
 
@@ -1123,7 +1212,16 @@ function stopAllAudio(){
     stopSound(sound);
   }
 
+  activeAudioSources.clear();
   levelHumSource=null;
+
+  const video=$("#introVideo");
+
+  try{
+    video.pause();
+    video.currentTime=0;
+  }catch(error){
+  }
 }
 
 function startLevelHum(){
@@ -1150,6 +1248,7 @@ function initRenderer(){
         powerPreference:"high-performance"
       });
   }catch(error){
+    console.error(error);
     showLoadingError("WebGL");
     return false;
   }
@@ -1196,6 +1295,7 @@ function initRenderer(){
     );
 
   camera.rotation.order="YXZ";
+
   scene.add(camera);
 
   const ambientLight=
@@ -1216,6 +1316,7 @@ function initRenderer(){
     );
 
   playerLight.position.set(0,1.1,0);
+
   camera.add(playerLight);
 
   const flashlight=
@@ -1257,6 +1358,28 @@ function initRenderer(){
   return true;
 }
 
+function applyQuality(){
+  if(!renderer){
+    return;
+  }
+
+  const low=
+    settings.quality==="low"||
+    (
+      settings.quality==="auto"&&
+      isMobile
+    );
+
+  renderer.setPixelRatio(
+    Math.min(
+      window.devicePixelRatio||1,
+      low?1.05:1.8
+    )
+  );
+
+  renderer.shadowMap.enabled=!low;
+}
+
 function prepareTexture(texture,repeatX=2,repeatY=2){
   texture.wrapS=THREE.RepeatWrapping;
   texture.wrapT=THREE.RepeatWrapping;
@@ -1295,10 +1418,6 @@ function loadModel(loader,filename){
 }
 
 async function loadAudioBuffer(filename){
-  if(!audioContext){
-    throw new Error("AudioContext не создан");
-  }
-
   const response=
     await fetch(assetURL(filename),{
       cache:"no-cache"
@@ -1319,6 +1438,10 @@ async function loadAudioBuffer(filename){
 }
 
 async function loadAllAssets(){
+  if(gameReady){
+    return true;
+  }
+
   if(loadingNow){
     return false;
   }
@@ -1523,61 +1646,94 @@ function createDecal(
   return decal;
 }
 
+function cloneMaterials(object){
+  object.traverse(child=>{
+    if(!child.isMesh||!child.material){
+      return;
+    }
+
+    if(Array.isArray(child.material)){
+      child.material=
+        child.material.map(material=>material.clone());
+    }else{
+      child.material=child.material.clone();
+    }
+  });
+}
+
 function prepareModel(object){
   object.visible=true;
+
+  cloneMaterials(object);
 
   object.traverse(child=>{
     child.visible=true;
     child.frustumCulled=false;
 
-    if(child.isMesh){
-      child.castShadow=!isMobile;
-      child.receiveShadow=true;
-
-      if(child.material){
-        const materials=
-          Array.isArray(child.material)
-            ?child.material
-            :[child.material];
-
-        const fixedMaterials=
-          materials.map(original=>{
-            const material=original.clone();
-
-            material.visible=true;
-            material.opacity=1;
-            material.transparent=false;
-            material.depthWrite=true;
-            material.depthTest=true;
-            material.side=THREE.DoubleSide;
-
-            if(material.color){
-              material.color.multiplyScalar(1.2);
-            }
-
-            if("emissive" in material){
-              material.emissiveIntensity=
-                Math.max(
-                  material.emissiveIntensity||0,
-                  .08
-                );
-            }
-
-            material.needsUpdate=true;
-
-            return material;
-          });
-
-        child.material=
-          Array.isArray(child.material)
-            ?fixedMaterials
-            :fixedMaterials[0];
-      }
+    if(!child.isMesh){
+      return;
     }
+
+    child.castShadow=!isMobile;
+    child.receiveShadow=true;
+
+    const materials=
+      Array.isArray(child.material)
+        ?child.material
+        :[child.material];
+
+    materials.forEach(material=>{
+      material.visible=true;
+      material.depthWrite=true;
+      material.depthTest=true;
+      material.side=THREE.DoubleSide;
+      material.needsUpdate=true;
+    });
   });
 }
 
-function addEmissiveGlow(object,color){
+function saveOriginalModuleMaterials(moduleObject){
+  const model=moduleObject.userData.model;
+
+  model.traverse(child=>{
+    if(!child.isMesh||!child.material){
+      return;
+    }
+
+    const materials=
+      Array.isArray(child.material)
+        ?child.material
+        :[child.material];
+
+    child.userData.inactiveMaterials=
+      materials.map(material=>material.clone());
+  });
+}
+
+function restoreOriginalModuleMaterials(moduleObject){
+  const model=moduleObject.userData.model;
+
+  model.traverse(child=>{
+    if(
+      !child.isMesh||
+      !child.userData.inactiveMaterials
+    ){
+      return;
+    }
+
+    const restored=
+      child.userData.inactiveMaterials.map(
+        material=>material.clone()
+      );
+
+    child.material=
+      restored.length===1
+        ?restored[0]
+        :restored;
+  });
+}
+
+function setObjectEmissive(object,color,intensity){
   object.traverse(child=>{
     if(!child.isMesh||!child.material){
       return;
@@ -1588,39 +1744,18 @@ function addEmissiveGlow(object,color){
         ?child.material
         :[child.material];
 
-    const glowingMaterials=
-      materials.map(original=>{
-        const material=original.clone();
+    materials.forEach(material=>{
+      if("emissive" in material){
+        material.emissive.set(color);
+        material.emissiveIntensity=intensity;
+      }
 
-        material.visible=true;
-        material.opacity=1;
-        material.transparent=false;
-        material.side=THREE.DoubleSide;
-
-        if("emissive" in material){
-          material.emissive=
-            new THREE.Color(color);
-
-          material.emissiveIntensity=1.7;
-        }
-
-        if(material.color){
-          material.color.multiplyScalar(1.18);
-        }
-
-        material.needsUpdate=true;
-
-        return material;
-      });
-
-    child.material=
-      Array.isArray(child.material)
-        ?glowingMaterials
-        :glowingMaterials[0];
+      material.needsUpdate=true;
+    });
   });
 }
 
-function createVisibleModuleModel(baseScene,position,index){
+function createSmallModule(baseScene,position,index){
   const container=new THREE.Group();
 
   container.position.set(
@@ -1632,17 +1767,188 @@ function createVisibleModuleModel(baseScene,position,index){
   container.userData={
     type:"module",
     index,
-    activated:Boolean(state.modules[index])
+    activated:false,
+    interactionRadius:1.6
   };
 
-  const model=cloneSkeleton(baseScene);
+  const module=cloneSkeleton(baseScene);
 
-  model.visible=true;
+  prepareModel(module);
 
-  prepareModel(model);
+  module.rotation.set(0,0,0);
 
-  container.add(model);
+  /*
+  Одинаковый масштаб для всех четырёх модулей.
+  */
+  module.scale.set(.25,.25,.25);
 
+  container.add(module);
+
+  module.updateMatrixWorld(true);
+
+  let box=
+    new THREE.Box3().setFromObject(module);
+
+  const center=
+    new THREE.Vector3();
+
+  box.getCenter(center);
+
+  module.position.x-=center.x;
+  module.position.z-=center.z;
+
+  module.updateMatrixWorld(true);
+
+  box=
+    new THREE.Box3().setFromObject(module);
+
+  /*
+  Ставим уменьшенную модель ровно на пол.
+  */
+  module.position.y+=.05-box.min.y;
+
+  container.userData.model=module;
+
+  const indicator=
+    new THREE.Mesh(
+      new THREE.CylinderGeometry(
+        .28,
+        .32,
+        .045,
+        20
+      ),
+      new THREE.MeshStandardMaterial({
+        color:0x3b3829,
+        emissive:0x4a3b0d,
+        emissiveIntensity:.35,
+        roughness:.65,
+        metalness:.25
+      })
+    );
+
+  indicator.position.y=.03;
+  container.add(indicator);
+
+  const ring=
+    new THREE.Mesh(
+      new THREE.TorusGeometry(
+        .31,
+        .018,
+        8,
+        24
+      ),
+      new THREE.MeshBasicMaterial({
+        color:0xe8bd45,
+        transparent:true,
+        opacity:.75
+      })
+    );
+
+  ring.rotation.x=Math.PI/2;
+  ring.position.y=.065;
+  container.add(ring);
+
+  const light=
+    new THREE.PointLight(
+      0xffce56,
+      isMobile?.18:.3,
+      2.2,
+      2
+    );
+
+  light.position.set(0,.55,0);
+  container.add(light);
+
+  container.userData.indicator=indicator;
+  container.userData.ring=ring;
+  container.userData.light=light;
+
+  saveOriginalModuleMaterials(container);
+  resetSingleModuleVisual(container);
+
+  return container;
+}
+
+function resetSingleModuleVisual(moduleObject){
+  moduleObject.userData.activated=false;
+
+  restoreOriginalModuleMaterials(moduleObject);
+
+  setObjectEmissive(
+    moduleObject.userData.model,
+    0x000000,
+    0
+  );
+
+  const indicator=moduleObject.userData.indicator;
+
+  indicator.material.color.set(0x3b3829);
+  indicator.material.emissive.set(0x4a3b0d);
+  indicator.material.emissiveIntensity=.35;
+
+  moduleObject.userData.ring.material.color.set(
+    0xe8bd45
+  );
+
+  moduleObject.userData.ring.material.opacity=.75;
+
+  moduleObject.userData.light.color.set(
+    0xffce56
+  );
+
+  moduleObject.userData.light.intensity=
+    isMobile?.18:.3;
+}
+
+function activateSingleModuleVisual(moduleObject){
+  moduleObject.userData.activated=true;
+
+  setObjectEmissive(
+    moduleObject.userData.model,
+    0x35ff68,
+    1.2
+  );
+
+  const indicator=moduleObject.userData.indicator;
+
+  indicator.material.color.set(0x235b2d);
+  indicator.material.emissive.set(0x35ff68);
+  indicator.material.emissiveIntensity=1.8;
+
+  moduleObject.userData.ring.material.color.set(
+    0x65ff81
+  );
+
+  moduleObject.userData.ring.material.opacity=1;
+
+  moduleObject.userData.light.color.set(
+    0x55ff77
+  );
+
+  moduleObject.userData.light.intensity=
+    isMobile?.65:1;
+}
+
+function findNamedObject(root,patterns){
+  let result=null;
+
+  root.traverse(child=>{
+    if(result){
+      return;
+    }
+
+    const name=(child.name||"").toLowerCase();
+
+    if(patterns.some(pattern=>name.includes(pattern))){
+      result=child;
+    }
+  });
+
+  return result;
+}
+
+function makeDoorVertical(model){
+  model.rotation.set(0,0,0);
   model.updateMatrixWorld(true);
 
   let box=
@@ -1653,25 +1959,52 @@ function createVisibleModuleModel(baseScene,position,index){
 
   box.getSize(size);
 
-  const currentHeight=
-    Math.max(size.y,.001);
+  /*
+  Исправляем только очевидно лежащую модель.
+  Выбор оси не случайный, а зависит от размеров GLB.
+  */
+  if(size.y<size.x&&size.x>=size.z){
+    model.rotation.z=Math.PI/2;
+  }else if(size.y<size.z&&size.z>size.x){
+    model.rotation.x=-Math.PI/2;
+  }
 
-  const targetHeight=1.45;
-
-  let scale=
-    targetHeight/currentHeight;
-
-  scale=
-    THREE.MathUtils.clamp(
-      scale,
-      .05,
-      25
-    );
-
-  model.scale.multiplyScalar(scale);
   model.updateMatrixWorld(true);
 
   box=
+    new THREE.Box3().setFromObject(model);
+
+  box.getSize(size);
+
+  /*
+  Нормализуем дверь по высоте дверного проёма.
+  */
+  if(size.y>.001){
+    const scale=THREE.MathUtils.clamp(
+      2.75/size.y,
+      .05,
+      8
+    );
+
+    model.scale.multiplyScalar(scale);
+  }
+
+  model.updateMatrixWorld(true);
+}
+
+function createDoorAssembly(baseScene){
+  doorAssembly=new THREE.Group();
+  doorAssembly.position.set(0,0,-24.45);
+  doorAssembly.rotation.set(0,0,0);
+
+  const model=cloneSkeleton(baseScene);
+
+  prepareModel(model);
+  makeDoorVertical(model);
+
+  model.updateMatrixWorld(true);
+
+  let box=
     new THREE.Box3().setFromObject(model);
 
   const center=
@@ -1687,102 +2020,180 @@ function createVisibleModuleModel(baseScene,position,index){
   box=
     new THREE.Box3().setFromObject(model);
 
-  model.position.y+=
-    .08-box.min.y;
+  model.position.y+=-box.min.y;
 
   model.updateMatrixWorld(true);
 
-  const baseGeometry=
-    new THREE.CylinderGeometry(
-      .75,
-      .86,
-      .1,
-      24
-    );
-
-  const baseMaterial=
-    new THREE.MeshStandardMaterial({
-      color:0x343224,
-      emissive:state.modules[index]
-        ?0x35ff68
-        :0xd0a62c,
-      emissiveIntensity:state.modules[index]
-        ?1.8
-        :.8,
-      roughness:.55,
-      metalness:.35
-    });
-
-  const visibleBase=
-    new THREE.Mesh(
-      baseGeometry,
-      baseMaterial
-    );
-
-  visibleBase.position.y=.05;
-  visibleBase.receiveShadow=true;
-
-  container.add(visibleBase);
-
-  const ringGeometry=
-    new THREE.TorusGeometry(
-      .7,
-      .04,
-      8,
-      30
-    );
-
-  const ringMaterial=
-    new THREE.MeshBasicMaterial({
-      color:state.modules[index]
-        ?0x65ff81
-        :0xffcf46,
-      transparent:true,
-      opacity:.95
-    });
-
-  const ring=
-    new THREE.Mesh(
-      ringGeometry,
-      ringMaterial
-    );
-
-  ring.rotation.x=Math.PI/2;
-  ring.position.y=.12;
-
-  container.add(ring);
-
-  const moduleLight=
-    new THREE.PointLight(
-      state.modules[index]
-        ?0x55ff77
-        :0xffcf55,
-      isMobile?.55:.9,
-      5,
-      2
-    );
-
-  moduleLight.position.set(
-    0,
-    1,
-    0
+  doorFrame=findNamedObject(
+    model,
+    ["doorframe","frame","рама"]
   );
 
-  container.add(moduleLight);
+  doorLeaf=findNamedObject(
+    model,
+    ["doorleaf","door_leaf","leaf","створка"]
+  );
 
-  container.userData.model=model;
-  container.userData.base=visibleBase;
-  container.userData.ring=ring;
-  container.userData.light=moduleLight;
-
-  if(state.modules[index]){
-    addEmissiveGlow(
+  if(!doorLeaf){
+    const doorCandidate=findNamedObject(
       model,
-      0x55ff77
+      ["door","panel"]
     );
+
+    if(
+      doorCandidate&&
+      doorCandidate!==doorFrame
+    ){
+      doorLeaf=doorCandidate;
+    }
   }
 
-  return container;
+  doorHinge=new THREE.Group();
+  doorAssembly.add(doorHinge);
+
+  if(doorLeaf&&doorFrame){
+    doorAssembly.add(model);
+    model.updateMatrixWorld(true);
+
+    const leafBox=
+      new THREE.Box3().setFromObject(doorLeaf);
+
+    const hingeWorld=
+      new THREE.Vector3(
+        leafBox.min.x,
+        leafBox.min.y,
+        leafBox.min.z
+      );
+
+    doorAssembly.worldToLocal(hingeWorld);
+
+    doorHinge.position.set(
+      hingeWorld.x,
+      0,
+      hingeWorld.z
+    );
+
+    doorHinge.attach(doorLeaf);
+  }else{
+    doorLeaf=model;
+
+    const modelBox=
+      new THREE.Box3().setFromObject(model);
+
+    doorHinge.position.set(
+      modelBox.min.x,
+      0,
+      0
+    );
+
+    doorHinge.add(model);
+
+    model.position.x-=modelBox.min.x;
+  }
+
+  doorAssembly.userData={
+    type:"door"
+  };
+
+  doorLeaf.userData.type="door";
+
+  initialDoorAssemblyPosition=
+    doorAssembly.position.clone();
+
+  initialDoorAssemblyRotation=
+    doorAssembly.rotation.clone();
+
+  initialDoorHingePosition=
+    doorHinge.position.clone();
+
+  initialDoorHingeRotation=
+    doorHinge.rotation.clone();
+
+  initialDoorLeafPosition=
+    doorLeaf.position.clone();
+
+  initialDoorLeafRotation=
+    doorLeaf.rotation.clone();
+
+  worldGroup.add(doorAssembly);
+  interactables.push(doorAssembly);
+}
+
+function resetDoorTransform(){
+  if(!doorAssembly||!doorHinge||!doorLeaf){
+    return;
+  }
+
+  doorOpening=false;
+  doorOpenProgress=0;
+
+  doorAssembly.position.copy(
+    initialDoorAssemblyPosition
+  );
+
+  doorAssembly.rotation.copy(
+    initialDoorAssemblyRotation
+  );
+
+  doorHinge.position.copy(
+    initialDoorHingePosition
+  );
+
+  doorHinge.rotation.copy(
+    initialDoorHingeRotation
+  );
+
+  doorLeaf.position.copy(
+    initialDoorLeafPosition
+  );
+
+  doorLeaf.rotation.copy(
+    initialDoorLeafRotation
+  );
+
+  doorAssembly.visible=true;
+  doorLeaf.visible=true;
+
+  state.doorOpen=false;
+  state.doorUnlocked=false;
+}
+
+function restoreDoorFromSave(){
+  resetDoorTransform();
+
+  state.doorUnlocked=
+    Boolean(state.doorUnlocked);
+
+  if(state.doorOpen){
+    doorOpenProgress=1;
+    doorHinge.rotation.y=
+      initialDoorHingeRotation.y-
+      Math.PI*.52;
+  }
+}
+
+function resetPanelVisual(){
+  if(!panelObject){
+    return;
+  }
+
+  setObjectEmissive(
+    panelObject,
+    0x000000,
+    0
+  );
+}
+
+function activatePanelVisual(){
+  if(!panelObject){
+    return;
+  }
+
+  setObjectEmissive(
+    panelObject,
+    0x38ff67,
+    1.25
+  );
 }
 
 function buildLevel(){
@@ -1794,8 +2205,7 @@ function buildLevel(){
   interactables=[];
   moduleObjects=[];
 
-  worldGroup=
-    new THREE.Group();
+  worldGroup=new THREE.Group();
 
   scene.add(worldGroup);
 
@@ -1918,8 +2328,11 @@ function buildLevel(){
     );
   });
 
-  createWall(-4,-24.8,7,1);
-  createWall(4,-24.8,7,1);
+  /*
+  Широкий дверной проём в центре.
+  */
+  createWall(-7,-24.8,11,1);
+  createWall(7,-24.8,11,1);
 
   for(let x=-22;x<=22;x+=7.3){
     for(let z=-22;z<=22;z+=7.3){
@@ -2046,7 +2459,7 @@ function buildLevel(){
 
   modulePositions.forEach((position,index)=>{
     const moduleObject=
-      createVisibleModuleModel(
+      createSmallModule(
         moduleBase,
         position,
         index
@@ -2062,51 +2475,27 @@ function buildLevel(){
       modelAssets["electrical_panel_backrooms.glb"].scene
     );
 
+  prepareModel(panelObject);
+
   panelObject.position.set(
     3.4,
     0,
     -24
   );
 
-  panelObject.rotation.y=Math.PI;
+  panelObject.rotation.set(0,Math.PI,0);
   panelObject.userData={type:"panel"};
-
-  prepareModel(panelObject);
 
   worldGroup.add(panelObject);
   interactables.push(panelObject);
 
-  doorPivot=new THREE.Group();
-
-  doorPivot.position.set(
-    -1.25,
-    0,
-    -24.35
+  createDoorAssembly(
+    modelAssets["backrooms_metal_door.glb"].scene
   );
-
-  worldGroup.add(doorPivot);
-
-  doorObject=
-    cloneSkeleton(
-      modelAssets["backrooms_metal_door.glb"].scene
-    );
-
-  doorObject.position.set(
-    1.25,
-    0,
-    0
-  );
-
-  doorObject.rotation.y=Math.PI;
-  doorObject.userData={type:"door"};
-
-  prepareModel(doorObject);
-
-  doorPivot.add(doorObject);
-  interactables.push(doorObject);
 
   setupWalker();
-  applySavedLevelState();
+  resetPanelVisual();
+  applyStateToLevel();
 }
 
 function setupWalker(){
@@ -2118,10 +2507,10 @@ function setupWalker(){
       walkerGLTF.scene
     );
 
-  walker.visible=false;
-  walker.position.copy(walkerSpawn);
-
   prepareModel(walker);
+
+  walker.position.copy(walkerSpawn);
+  walker.visible=false;
 
   worldGroup.add(walker);
 
@@ -2136,19 +2525,32 @@ function setupWalker(){
   }
 }
 
-function playWalkerAnimation(animationName,loop=true){
-  const nextAction=
-    walkerActions[animationName];
-
-  if(!nextAction){
+function stopWalkerAnimations(){
+  if(!walkerMixer){
     return;
   }
 
-  Object.values(walkerActions).forEach(action=>{
+  walkerMixer.stopAllAction();
+
+  for(const action of Object.values(walkerActions)){
+    action.stop();
+    action.reset();
+  }
+}
+
+function playWalkerAnimation(name,loop=true){
+  const nextAction=walkerActions[name];
+
+  if(!nextAction){
+    console.warn("Анимация не найдена:",name);
+    return;
+  }
+
+  for(const action of Object.values(walkerActions)){
     if(action!==nextAction){
-      action.fadeOut(.22);
+      action.fadeOut(.18);
     }
-  });
+  }
 
   nextAction.reset();
 
@@ -2160,44 +2562,55 @@ function playWalkerAnimation(animationName,loop=true){
   );
 
   nextAction.clampWhenFinished=!loop;
-
-  nextAction.fadeIn(.22).play();
+  nextAction.fadeIn(.18).play();
 }
 
-function applySavedLevelState(){
-  state.modules.forEach((activated,index)=>{
-    const moduleObject=moduleObjects[index];
+function resetWalker(){
+  if(!walker){
+    return;
+  }
 
-    if(!moduleObject){
-      return;
-    }
+  stopWalkerAnimations();
 
-    if(activated){
-      activateModuleVisuals(
-        moduleObject,
-        false
-      );
+  walker.position.copy(walkerSpawn);
+  walker.rotation.set(0,0,0);
+  walker.visible=false;
+
+  walkerState="hidden";
+  walkerPreviousState="hidden";
+
+  freezeReleaseTimer=0;
+  walkerFootTimer=0;
+  walkerBreathTimer=0;
+
+  attacking=false;
+
+  $("#jumpscareFx").classList.remove("active");
+}
+
+function applyStateToLevel(){
+  moduleObjects.forEach((moduleObject,index)=>{
+    if(state.modules[index]){
+      activateSingleModuleVisual(moduleObject);
+    }else{
+      resetSingleModuleVisual(moduleObject);
     }
   });
 
-  state.doorUnlocked=
-    state.modules.every(Boolean)||
-    state.doorUnlocked;
-
   if(state.doorUnlocked){
-    addEmissiveGlow(
-      panelObject,
-      0x6eff8a
-    );
+    activatePanelVisual();
+  }else{
+    resetPanelVisual();
   }
+
+  restoreDoorFromSave();
 
   const activatedCount=
     state.modules.filter(Boolean).length;
 
-  if(activatedCount<2){
-    walkerState="hidden";
-    walker.visible=false;
-  }else{
+  resetWalker();
+
+  if(activatedCount>=2){
     walker.visible=true;
 
     if(activatedCount>=4){
@@ -2215,67 +2628,103 @@ function applySavedLevelState(){
   updateHUD();
 }
 
-function activateModuleVisuals(moduleObject,playActivationSound=true){
-  const model=
-    moduleObject.userData.model||
-    moduleObject;
+function resetGameForNewRun(){
+  clearRunTimers();
+  stopAllAudio();
 
-  addEmissiveGlow(
-    model,
-    0x55ff77
-  );
+  localStorage.removeItem(SAVE_KEY);
 
-  if(moduleObject.userData.base){
-    moduleObject.userData.base.material.emissive.set(
-      0x35ff68
+  state=DEFAULT_STATE();
+
+  playing=false;
+  paused=false;
+  attacking=false;
+  watchingIntroOnly=false;
+  introFinishing=false;
+  continueStarting=false;
+
+  yaw=Math.PI;
+  pitch=0;
+
+  keys={};
+  runHeld=false;
+
+  moveInput.x=0;
+  moveInput.z=0;
+
+  stamina=100;
+  bob=0;
+
+  footTimer=0;
+  walkerFootTimer=0;
+  playerBreathTimer=0;
+  walkerBreathTimer=0;
+  freezeReleaseTimer=0;
+
+  currentInteractable=null;
+  checkpointIndex=0;
+
+  $("#prompt").style.display="none";
+  $("#prompt").textContent="";
+
+  $("#toast").classList.remove("show");
+  $("#toast").textContent="";
+
+  $("#ending").classList.remove("active");
+  $("#jumpscareFx").classList.remove("active");
+
+  $("#hud").classList.remove("active");
+  $("#mobileControls").classList.remove("playing");
+
+  if(camera){
+    camera.position.set(
+      SAFE_SPAWN.x,
+      eyeHeight,
+      SAFE_SPAWN.z
     );
 
-    moduleObject.userData.base.material.emissiveIntensity=
-      1.8;
-  }
-
-  if(moduleObject.userData.ring){
-    moduleObject.userData.ring.material.color.set(
-      0x65ff81
-    );
-  }
-
-  if(moduleObject.userData.light){
-    moduleObject.userData.light.color.set(
-      0x55ff77
+    camera.rotation.set(
+      0,
+      Math.PI,
+      0
     );
 
-    moduleObject.userData.light.intensity=
-      isMobile?.8:1.15;
+    if(camera.userData.flashlight){
+      camera.userData.flashlight.intensity=0;
+    }
   }
 
-  moduleObject.userData.activated=true;
+  if(gameReady){
+    moduleObjects.forEach(moduleObject=>{
+      resetSingleModuleVisual(moduleObject);
+    });
 
-  if(playActivationSound){
-    playSound(
-      "PodOn0.mp3",
-      .85
-    );
+    resetPanelVisual();
+    resetDoorTransform();
+    resetWalker();
   }
+
+  updateHUD();
+  updateContinueButton();
 }
 
 function updateHUD(){
-  const moduleCount=
+  const count=
     state.modules.filter(Boolean).length;
 
   $("#moduleCount").textContent=
-    `МОДУЛИ: ${moduleCount}/4`;
+    `МОДУЛИ: ${count}/4`;
 
   $("#objective").textContent=
-    moduleCount<4
+    count<4
       ?"ЦЕЛЬ: АКТИВИРУЙТЕ 4 ЭНЕРГЕТИЧЕСКИХ МОДУЛЯ"
       :"ЦЕЛЬ: ДОБЕРИТЕСЬ ДО ВЫХОДА";
 
   $("#staminaBar").style.width=
-    stamina+"%";
+    `${Math.max(0,Math.min(100,stamina))}%`;
 
   $("#batteryBar").style.width=
-    state.battery+"%";
+    `${Math.max(0,Math.min(100,state.battery))}%`;
 }
 
 function showToast(message,duration=2200){
@@ -2286,34 +2735,8 @@ function showToast(message,duration=2200){
 
   toastTimer=setTimeout(()=>{
     $("#toast").classList.remove("show");
+    toastTimer=null;
   },duration);
-}
-
-function resetNewGame(){
-  state={
-    started:true,
-    completed:false,
-    modules:[false,false,false,false],
-    battery:100,
-    doorUnlocked:false,
-
-    player:{
-      ...SAFE_SPAWN
-    },
-
-    checkpoint:{
-      ...SAFE_SPAWN
-    }
-  };
-
-  stamina=100;
-  yaw=Math.PI;
-  pitch=0;
-
-  checkpointIndex=0;
-  doorOpenAmount=0;
-
-  saveGame();
 }
 
 function collidesWithWall(x,z,radius=playerRadius){
@@ -2341,36 +2764,42 @@ function findSafeSpawn(){
   ];
 
   for(const candidate of candidates){
-    if(
-      !collidesWithWall(
-        candidate.x,
-        candidate.z
-      )
-    ){
+    if(!collidesWithWall(candidate.x,candidate.z)){
       return candidate;
     }
   }
 
-  return new THREE.Vector3(
-    0,
-    eyeHeight,
-    20
-  );
+  return new THREE.Vector3(0,eyeHeight,20);
 }
 
-async function startLevel(){
+async function startLevel(loadExistingSave=false){
   await unlockAudio();
 
   if(!gameReady){
-    const loaded=
-      await loadAllAssets();
+    const loaded=await loadAllAssets();
 
     if(!loaded){
-      continueStarting=false;
       newGameStarting=false;
+      continueStarting=false;
       $("#newGameBtn").disabled=false;
       return;
     }
+  }
+
+  if(loadExistingSave){
+    if(!loadProgress()){
+      showToast("СОХРАНЕНИЕ НЕ НАЙДЕНО");
+      returnToMainMenu();
+      return;
+    }
+
+    applyStateToLevel();
+  }else{
+    /*
+    Новая игра никогда не загружает старое сохранение.
+    */
+    state=DEFAULT_STATE();
+    applyStateToLevel();
   }
 
   let spawn=
@@ -2383,26 +2812,9 @@ async function startLevel(){
   if(
     !Number.isFinite(spawn.x)||
     !Number.isFinite(spawn.z)||
-    collidesWithWall(
-      spawn.x,
-      spawn.z
-    )
+    collidesWithWall(spawn.x,spawn.z)
   ){
     spawn=findSafeSpawn();
-
-    state.player={
-      x:spawn.x,
-      y:eyeHeight,
-      z:spawn.z
-    };
-
-    state.checkpoint={
-      x:spawn.x,
-      y:eyeHeight,
-      z:spawn.z
-    };
-
-    saveGame();
   }
 
   camera.position.copy(spawn);
@@ -2415,6 +2827,13 @@ async function startLevel(){
     yaw,
     0
   );
+
+  if(camera.userData.flashlight){
+    camera.userData.flashlight.intensity=
+      state.flashlightOn&&state.battery>0
+        ?4.6
+        :0;
+  }
 
   playing=true;
   paused=false;
@@ -2430,10 +2849,11 @@ async function startLevel(){
   $("#hud").classList.add("active");
   $("#mobileControls").classList.add("playing");
 
+  updateHUD();
   startLevelHum();
 
   if(!isMobile){
-    setTimeout(()=>{
+    schedule(()=>{
       $("#gameCanvas").requestPointerLock?.();
     },120);
   }
@@ -2441,7 +2861,7 @@ async function startLevel(){
 
 function returnToMainMenu(){
   if(playing){
-    saveGame();
+    saveProgress();
   }
 
   playing=false;
@@ -2452,6 +2872,7 @@ function returnToMainMenu(){
   continueStarting=false;
   introFinishing=false;
 
+  clearRunTimers();
   stopAllAudio();
 
   document.exitPointerLock?.();
@@ -2464,7 +2885,7 @@ function returnToMainMenu(){
   removeFadeImmediately();
 
   showScreen("menu");
-  loadSave();
+  updateContinueButton();
 }
 
 function prepareIntroVideo(){
@@ -2487,9 +2908,8 @@ function playIntro(onlyWatch=false){
   showScreen("introScreen");
 
   const video=$("#introVideo");
-  const tapMessage=$("#introTapMessage");
 
-  tapMessage.classList.remove("visible");
+  $("#introTapMessage").classList.remove("visible");
 
   try{
     video.pause();
@@ -2499,25 +2919,21 @@ function playIntro(onlyWatch=false){
 
   video.volume=settings.volume;
 
-  const playPromise=video.play();
+  const promise=video.play();
 
-  if(
-    playPromise&&
-    typeof playPromise.catch==="function"
-  ){
-    playPromise.catch(()=>{
-      tapMessage.classList.add("visible");
+  if(promise&&typeof promise.catch==="function"){
+    promise.catch(()=>{
+      $("#introTapMessage").classList.add("visible");
     });
   }
 }
 
-async function finishIntro(){
+function finishIntro(){
   if(introFinishing){
     return;
   }
 
   introFinishing=true;
-  newGameStarting=false;
 
   const video=$("#introVideo");
 
@@ -2538,10 +2954,11 @@ async function finishIntro(){
             :"menu"
         );
       }else{
-        await startLevel();
+        await startLevel(false);
       }
     }finally{
       introFinishing=false;
+      newGameStarting=false;
       $("#newGameBtn").disabled=false;
     }
   });
@@ -2551,29 +2968,32 @@ function beginNewGame(event){
   event?.preventDefault();
   event?.stopPropagation();
 
-  if(
-    newGameStarting||
-    introFinishing
-  ){
+  if(newGameStarting||introFinishing){
     return;
   }
 
   newGameStarting=true;
 
-  const button=$("#newGameBtn");
-  button.disabled=true;
+  $("#newGameBtn").disabled=true;
 
   removeFadeImmediately();
 
-  resetNewGame();
+  /*
+  Полный сброс выполняется до интро.
+  Старое сохранение прохождения удаляется.
+  */
+  resetGameForNewRun();
+
+  newGameStarting=true;
+  $("#newGameBtn").disabled=true;
 
   unlockAudio().catch(()=>{});
 
   playIntro(false);
 
-  setTimeout(()=>{
+  schedule(()=>{
     if(!introFinishing){
-      button.disabled=false;
+      $("#newGameBtn").disabled=false;
     }
   },700);
 }
@@ -2588,24 +3008,20 @@ function beginContinue(event){
 
   continueStarting=true;
 
-  const button=$("#continueBtn");
-  button.disabled=true;
+  $("#continueBtn").disabled=true;
 
   removeFadeImmediately();
 
   unlockAudio().catch(()=>{});
 
-  loadSave();
-  state.started=true;
-
-  startLevel()
+  startLevel(true)
     .catch(error=>{
       console.error(error);
       showToast("НЕ УДАЛОСЬ ЗАПУСТИТЬ ИГРУ");
     })
     .finally(()=>{
       continueStarting=false;
-      loadSave();
+      updateContinueButton();
     });
 }
 
@@ -2659,11 +3075,10 @@ $("#retryBtn").addEventListener("click",async()=>{
   gameReady=false;
   loadingNow=false;
 
-  const loaded=
-    await loadAllAssets();
+  const loaded=await loadAllAssets();
 
   if(loaded){
-    await startLevel();
+    await startLevel(false);
   }
 });
 
@@ -2724,12 +3139,10 @@ async function resumeGame(){
   await unlockAudio();
 
   paused=false;
+
   showScreen(null);
 
-  if(
-    playing&&
-    !levelHumSource
-  ){
+  if(playing&&!levelHumSource){
     startLevelHum();
   }
 
@@ -2743,51 +3156,26 @@ $("#pauseBtn").addEventListener("click",pauseGame);
 $("#mainMenuBtn").addEventListener("click",returnToMainMenu);
 
 $("#volumeRange").addEventListener("input",event=>{
-  settings.volume=
-    Number(event.target.value);
+  settings.volume=Number(event.target.value);
 
   updateMasterVolume();
+  saveSettings();
 
-  if(
-    $("#introScreen").classList.contains("active")
-  ){
+  if($("#introScreen").classList.contains("active")){
     $("#introVideo").volume=settings.volume;
   }
-
-  saveGame();
 });
 
 $("#sensitivityRange").addEventListener("input",event=>{
-  settings.sensitivity=
-    Number(event.target.value);
-
-  saveGame();
+  settings.sensitivity=Number(event.target.value);
+  saveSettings();
 });
 
 $("#qualitySelect").addEventListener("change",event=>{
   settings.quality=event.target.value;
 
-  saveGame();
-
-  if(!renderer){
-    return;
-  }
-
-  const lowQuality=
-    settings.quality==="low"||
-    (
-      settings.quality==="auto"&&
-      isMobile
-    );
-
-  renderer.setPixelRatio(
-    Math.min(
-      window.devicePixelRatio||1,
-      lowQuality?1.05:1.8
-    )
-  );
-
-  renderer.shadowMap.enabled=!lowQuality;
+  saveSettings();
+  applyQuality();
 });
 
 document.addEventListener("keydown",event=>{
@@ -2816,10 +3204,7 @@ document.addEventListener("keydown",event=>{
     interact();
   }
 
-  if(
-    event.code==="Escape"&&
-    playing
-  ){
+  if(event.code==="Escape"&&playing){
     if(paused){
       resumeGame();
     }else{
@@ -2845,30 +3230,20 @@ document.addEventListener("mousemove",event=>{
     playing&&
     !paused
   ){
-    yaw-=
-      event.movementX*
-      settings.sensitivity;
+    yaw-=event.movementX*settings.sensitivity;
+    pitch-=event.movementY*settings.sensitivity;
 
-    pitch-=
-      event.movementY*
-      settings.sensitivity;
-
-    pitch=
-      Math.max(
-        -1.35,
-        Math.min(1.35,pitch)
-      );
+    pitch=Math.max(
+      -1.35,
+      Math.min(1.35,pitch)
+    );
   }
 });
 
 $("#gameCanvas").addEventListener("click",()=>{
   unlockAudio().catch(()=>{});
 
-  if(
-    playing&&
-    !paused&&
-    !isMobile
-  ){
+  if(playing&&!paused&&!isMobile){
     $("#gameCanvas").requestPointerLock?.();
   }
 });
@@ -2938,10 +3313,7 @@ function updateJoystick(event){
 }
 
 function stopJoystick(event){
-  if(
-    event.pointerId!==
-    joystickPointer
-  ){
+  if(event.pointerId!==joystickPointer){
     return;
   }
 
@@ -2964,13 +3336,8 @@ $("#joystick").addEventListener("pointerdown",event=>{
     $("#joystick").getBoundingClientRect();
 
   joystickCenter={
-    x:
-      rectangle.left+
-      rectangle.width/2,
-
-    y:
-      rectangle.top+
-      rectangle.height/2
+    x:rectangle.left+rectangle.width/2,
+    y:rectangle.top+rectangle.height/2
   };
 
   updateJoystick(event);
@@ -3007,12 +3374,10 @@ $("#lookZone").addEventListener("pointermove",event=>{
   }
 
   const deltaX=
-    event.clientX-
-    lastLookPosition.x;
+    event.clientX-lastLookPosition.x;
 
   const deltaY=
-    event.clientY-
-    lastLookPosition.y;
+    event.clientY-lastLookPosition.y;
 
   lastLookPosition={
     x:event.clientX,
@@ -3029,11 +3394,10 @@ $("#lookZone").addEventListener("pointermove",event=>{
     settings.sensitivity*
     1.35;
 
-  pitch=
-    Math.max(
-      -1.35,
-      Math.min(1.35,pitch)
-    );
+  pitch=Math.max(
+    -1.35,
+    Math.min(1.35,pitch)
+  );
 });
 
 $("#lookZone").addEventListener("pointerup",()=>{
@@ -3047,10 +3411,7 @@ $("#lookZone").addEventListener("pointercancel",()=>{
 });
 
 function toggleFlashlight(){
-  if(
-    !camera||
-    !camera.userData.flashlight
-  ){
+  if(!camera||!camera.userData.flashlight){
     return;
   }
 
@@ -3059,17 +3420,13 @@ function toggleFlashlight(){
     return;
   }
 
-  const flashlight=
-    camera.userData.flashlight;
+  state.flashlightOn=!state.flashlightOn;
 
-  const turningOn=
-    flashlight.intensity<=0;
-
-  flashlight.intensity=
-    turningOn?4.6:0;
+  camera.userData.flashlight.intensity=
+    state.flashlightOn?4.6:0;
 
   playSound(
-    turningOn
+    state.flashlightOn
       ?"Lighton0.mp3"
       :"Lightof0.mp3",
     .8
@@ -3086,7 +3443,7 @@ function playerCollides(x,z){
       Math.hypot(
         x-moduleObject.position.x,
         z-moduleObject.position.z
-      )<.75
+      )<.48
     ){
       return true;
     }
@@ -3103,9 +3460,10 @@ function playerCollides(x,z){
   }
 
   if(
-    doorOpenAmount<.6&&
-    Math.abs(z+24.35)<.65&&
-    Math.abs(x)<1.6
+    !state.doorOpen&&
+    doorOpenProgress<.7&&
+    Math.abs(z+24.45)<.55&&
+    Math.abs(x)<1.45
   ){
     return true;
   }
@@ -3133,8 +3491,7 @@ function updatePlayer(deltaTime){
   const inputLength=
     Math.hypot(inputX,inputZ);
 
-  const moving=
-    inputLength>.08;
+  const moving=inputLength>.08;
 
   if(moving){
     inputX/=inputLength;
@@ -3150,20 +3507,16 @@ function updatePlayer(deltaTime){
     running?4.4:2.45;
 
   if(running){
-    stamina=
-      Math.max(
-        0,
-        stamina-
-        deltaTime*18
-      );
+    stamina=Math.max(
+      0,
+      stamina-deltaTime*18
+    );
   }else{
-    stamina=
-      Math.min(
-        100,
-        stamina+
-        deltaTime*
-        (moving?7:12)
-      );
+    stamina=Math.min(
+      100,
+      stamina+
+      deltaTime*(moving?7:12)
+    );
   }
 
   const sinYaw=Math.sin(yaw);
@@ -3186,8 +3539,7 @@ function updatePlayer(deltaTime){
     deltaTime;
 
   const proposedX=
-    camera.position.x+
-    moveX;
+    camera.position.x+moveX;
 
   if(
     !playerCollides(
@@ -3199,8 +3551,7 @@ function updatePlayer(deltaTime){
   }
 
   const proposedZ=
-    camera.position.z+
-    moveZ;
+    camera.position.z+moveZ;
 
   if(
     !playerCollides(
@@ -3243,12 +3594,22 @@ function updatePlayer(deltaTime){
         eyeHeight-
         camera.position.y
       )*
-      Math.min(
-        1,
-        deltaTime*8
-      );
+      Math.min(1,deltaTime*8);
 
     footTimer=0;
+  }
+
+  if(stamina<22&&moving){
+    playerBreathTimer-=deltaTime;
+
+    if(playerBreathTimer<=0){
+      playSound(
+        "Player’s breath.mp3",
+        .48
+      );
+
+      playerBreathTimer=3.8;
+    }
   }
 
   camera.rotation.set(
@@ -3263,13 +3624,44 @@ function updatePlayer(deltaTime){
     z:camera.position.z
   };
 
+  updateCheckpoint();
   updateHUD();
+}
+
+function updateCheckpoint(){
+  let bestCheckpoint=checkpointIndex;
+
+  checkpoints.forEach((checkpoint,index)=>{
+    if(
+      index>bestCheckpoint&&
+      camera.position.distanceTo(checkpoint)<2.1
+    ){
+      bestCheckpoint=index;
+    }
+  });
+
+  if(bestCheckpoint!==checkpointIndex){
+    checkpointIndex=bestCheckpoint;
+
+    const checkpoint=
+      checkpoints[bestCheckpoint];
+
+    state.checkpoint={
+      x:checkpoint.x,
+      y:eyeHeight,
+      z:checkpoint.z
+    };
+
+    saveProgress();
+
+    showToast("КОНТРОЛЬНАЯ ТОЧКА");
+  }
 }
 
 function findInteractable(){
   currentInteractable=null;
 
-  let nearestDistance=3;
+  let nearestDistance=2.55;
 
   for(const object of interactables){
     const worldPosition=
@@ -3294,7 +3686,7 @@ function findInteractable(){
       new THREE.Vector3(0,0,-1)
         .applyQuaternion(camera.quaternion);
 
-    if(direction.dot(lookDirection)>.15){
+    if(direction.dot(lookDirection)>.12){
       nearestDistance=distance;
       currentInteractable=object;
     }
@@ -3311,27 +3703,30 @@ function findInteractable(){
     currentInteractable.userData.type||
     currentInteractable.parent?.userData.type;
 
-  let promptText="";
+  let text="";
 
   if(type==="module"){
-    promptText=
-      `${isMobile?"ACTION":"E"} — АКТИВИРОВАТЬ МОДУЛЬ`;
+    const index=currentInteractable.userData.index;
+
+    text=state.modules[index]
+      ?"МОДУЛЬ АКТИВИРОВАН"
+      :`${isMobile?"ACTION":"E"} — АКТИВИРОВАТЬ МОДУЛЬ`;
   }
 
   if(type==="door"){
-    promptText=
+    text=
       `${isMobile?"ACTION":"E"} — ОТКРЫТЬ ДВЕРЬ`;
   }
 
   if(type==="panel"){
-    promptText=
+    text=
       state.doorUnlocked
         ?"ЩИТОК АКТИВЕН"
         :"НЕТ ПИТАНИЯ";
   }
 
-  prompt.textContent=promptText;
-  prompt.style.display=promptText?"block":"none";
+  prompt.textContent=text;
+  prompt.style.display=text?"block":"none";
 }
 
 function interact(){
@@ -3343,30 +3738,19 @@ function interact(){
     return;
   }
 
-  let type=
-    currentInteractable.userData.type;
-
-  if(
-    !type&&
-    currentInteractable.parent
-  ){
-    type=
-      currentInteractable.parent.userData.type;
-  }
+  const type=
+    currentInteractable.userData.type||
+    currentInteractable.parent?.userData.type;
 
   if(type==="module"){
-    const moduleIndex=
-      currentInteractable.userData.index;
+    const index=currentInteractable.userData.index;
 
-    if(state.modules[moduleIndex]){
+    if(state.modules[index]){
       showToast("МОДУЛЬ УЖЕ АКТИВИРОВАН");
       return;
     }
 
-    activateModule(
-      moduleIndex,
-      currentInteractable
-    );
+    activateModule(index,currentInteractable);
   }
 
   if(type==="door"){
@@ -3374,20 +3758,24 @@ function interact(){
   }
 }
 
-function activateModule(moduleIndex,moduleObject){
-  state.modules[moduleIndex]=true;
+function activateModule(index,moduleObject){
+  if(state.modules[index]){
+    return;
+  }
+
+  state.modules[index]=true;
+  moduleObject.userData.activated=true;
 
   playSound("Vzatmod0.mp3",.8);
 
-  setTimeout(()=>{
+  schedule(()=>{
     playSound("Zapmod0.mp3",.9);
   },350);
 
-  setTimeout(()=>{
-    activateModuleVisuals(
-      moduleObject,
-      true
-    );
+  schedule(()=>{
+    activateSingleModuleVisual(moduleObject);
+
+    playSound("PodOn0.mp3",.85);
 
     const activatedCount=
       state.modules.filter(Boolean).length;
@@ -3398,13 +3786,13 @@ function activateModule(moduleIndex,moduleObject){
 
     handleModuleCount(activatedCount);
 
-    saveGame();
+    saveProgress();
     updateHUD();
   },950);
 }
 
-function handleModuleCount(activatedCount){
-  if(activatedCount===1){
+function handleModuleCount(count){
+  if(count===1){
     walker.visible=true;
     walker.position.copy(walkerSpawn);
 
@@ -3421,7 +3809,7 @@ function handleModuleCount(activatedCount){
       false
     );
 
-    setTimeout(()=>{
+    schedule(()=>{
       if(walkerState==="appear"){
         walker.visible=false;
         walkerState="hidden";
@@ -3429,34 +3817,25 @@ function handleModuleCount(activatedCount){
     },4200);
   }
 
-  if(activatedCount===2){
+  if(count===2){
     walker.visible=true;
-
-    walker.position.set(
-      15,
-      0,
-      -10
-    );
-
+    walker.position.set(15,0,-10);
     walkerState="walk";
 
     playWalkerAnimation("Walk");
   }
 
-  if(activatedCount===3){
+  if(count===3){
     walker.visible=true;
     walkerState="search";
 
     playWalkerAnimation("Chase");
   }
 
-  if(activatedCount===4){
+  if(count===4){
     state.doorUnlocked=true;
 
-    addEmissiveGlow(
-      panelObject,
-      0x6eff8a
-    );
+    activatePanelVisual();
 
     walker.visible=true;
     walkerState="chase";
@@ -3467,6 +3846,8 @@ function handleModuleCount(activatedCount){
       "ДВЕРЬ РАЗБЛОКИРОВАНА — БЕГИТЕ К ВЫХОДУ",
       3200
     );
+
+    saveProgress();
   }
 }
 
@@ -3477,53 +3858,72 @@ function openDoor(){
       .85
     );
 
-    const modulesRemaining=
+    const remaining=
       4-
       state.modules.filter(Boolean).length;
 
     showToast(
-      `ДВЕРЬ ЗАПЕРТА — ОСТАЛОСЬ МОДУЛЕЙ: ${modulesRemaining}`
+      `ДВЕРЬ ЗАПЕРТА — ОСТАЛОСЬ МОДУЛЕЙ: ${remaining}`
     );
 
     return;
   }
 
-  if(doorOpenAmount>0){
+  if(doorOpening||state.doorOpen){
     return;
   }
 
-  playSound("OpeningMD0.mp3",1);
+  doorOpening=true;
 
-  doorOpenAmount=.001;
+  playSound("OpeningMD0.mp3",1);
+}
+
+function updateDoor(deltaTime){
+  if(!doorOpening){
+    return;
+  }
+
+  doorOpenProgress=Math.min(
+    1,
+    doorOpenProgress+
+    deltaTime*.42
+  );
+
+  doorHinge.rotation.y=
+    initialDoorHingeRotation.y-
+    Math.PI*.52*
+    doorOpenProgress;
+
+  if(doorOpenProgress>=1){
+    doorOpening=false;
+    state.doorOpen=true;
+    saveProgress();
+  }
 }
 
 function flashlightHitsWalker(){
   if(
     !walker||
     !walker.visible||
+    !state.flashlightOn||
     camera.userData.flashlight.intensity<=0
   ){
     return false;
   }
 
-  const walkerTarget=
+  const target=
     walker.position
       .clone()
       .add(
-        new THREE.Vector3(
-          0,
-          1.2,
-          0
-        )
+        new THREE.Vector3(0,1.2,0)
       );
 
   const direction=
-    walkerTarget
+    target
       .clone()
       .sub(camera.position);
 
-  const distance=
-    direction.length();
+  const distance=direction.length();
 
   if(distance>24){
     return false;
@@ -3535,9 +3935,7 @@ function flashlightHitsWalker(){
     new THREE.Vector3(0,0,-1)
       .applyQuaternion(camera.quaternion);
 
-  if(
-    lookDirection.dot(direction)<.965
-  ){
+  if(lookDirection.dot(direction)<.965){
     return false;
   }
 
@@ -3549,13 +3947,13 @@ function flashlightHitsWalker(){
       distance
     );
 
-  const wallHits=
+  const hits=
     raycaster.intersectObjects(
       walls.map(wall=>wall.mesh),
       false
     );
 
-  return wallHits.length===0;
+  return hits.length===0;
 }
 
 function walkerCollides(x,z){
@@ -3564,6 +3962,44 @@ function walkerCollides(x,z){
     z,
     walkerRadius
   );
+}
+
+function clearPathToPlayer(){
+  const start=
+    walker.position
+      .clone()
+      .add(
+        new THREE.Vector3(0,1,0)
+      );
+
+  const direction=
+    camera.position
+      .clone()
+      .sub(start);
+
+  const distance=direction.length();
+
+  if(distance<=.01){
+    return true;
+  }
+
+  direction.normalize();
+
+  const raycaster=
+    new THREE.Raycaster(
+      start,
+      direction,
+      0,
+      distance
+    );
+
+  const hits=
+    raycaster.intersectObjects(
+      walls.map(wall=>wall.mesh),
+      false
+    );
+
+  return hits.length===0;
 }
 
 function tryWalkerStep(direction,distance){
@@ -3579,22 +4015,12 @@ function tryWalkerStep(direction,distance){
 
   let moved=false;
 
-  if(
-    !walkerCollides(
-      nextX,
-      walker.position.z
-    )
-  ){
+  if(!walkerCollides(nextX,walker.position.z)){
     walker.position.x=nextX;
     moved=true;
   }
 
-  if(
-    !walkerCollides(
-      walker.position.x,
-      nextZ
-    )
-  ){
+  if(!walkerCollides(walker.position.x,nextZ)){
     walker.position.z=nextZ;
     moved=true;
   }
@@ -3603,82 +4029,40 @@ function tryWalkerStep(direction,distance){
 }
 
 function moveWalkerWithCollisions(direction,speed,deltaTime){
-  const stepDistance=
-    speed*
-    deltaTime;
+  const distance=speed*deltaTime;
 
-  if(
-    direction.lengthSq()<=.0001
-  ){
+  if(direction.lengthSq()<=.0001){
     return;
   }
 
   direction.normalize();
-
   walkerLastDirection.copy(direction);
 
-  if(
-    tryWalkerStep(
-      direction,
-      stepDistance
-    )
-  ){
+  if(tryWalkerStep(direction,distance)){
     return;
   }
 
-  const leftDirection=
+  const left=
     new THREE.Vector3(
       -direction.z,
       0,
       direction.x
     );
 
-  const rightDirection=
+  const right=
     new THREE.Vector3(
       direction.z,
       0,
       -direction.x
     );
 
-  const leftClear=
-    !walkerCollides(
-      walker.position.x+
-      leftDirection.x*
-      .14,
-
-      walker.position.z+
-      leftDirection.z*
-      .14
-    );
-
-  const rightClear=
-    !walkerCollides(
-      walker.position.x+
-      rightDirection.x*
-      .14,
-
-      walker.position.z+
-      rightDirection.z*
-      .14
-    );
-
-  if(leftClear){
-    tryWalkerStep(
-      leftDirection,
-      stepDistance
-    );
-
-    walkerLastDirection.copy(leftDirection);
+  if(tryWalkerStep(left,distance)){
+    walkerLastDirection.copy(left);
     return;
   }
 
-  if(rightClear){
-    tryWalkerStep(
-      rightDirection,
-      stepDistance
-    );
-
-    walkerLastDirection.copy(rightDirection);
+  if(tryWalkerStep(right,distance)){
+    walkerLastDirection.copy(right);
   }
 }
 
@@ -3700,6 +4084,7 @@ function updateWalker(deltaTime){
     freezeReleaseTimer=1;
 
     if(walkerState!=="frozen"){
+      walkerPreviousState=walkerState;
       walkerState="frozen";
 
       playWalkerAnimation("Frozen");
@@ -3720,16 +4105,10 @@ function updateWalker(deltaTime){
       return;
     }
 
-    const activatedCount=
-      state.modules.filter(Boolean).length;
-
-    if(activatedCount>=4){
-      walkerState="chase";
-    }else if(activatedCount>=3){
-      walkerState="search";
-    }else{
-      walkerState="walk";
-    }
+    walkerState=
+      walkerPreviousState==="hidden"
+        ?"walk"
+        :walkerPreviousState;
 
     playWalkerAnimation(
       walkerState==="walk"
@@ -3738,10 +4117,15 @@ function updateWalker(deltaTime){
     );
   }
 
-  const target=
-    camera.position.clone();
+  const direction=
+    camera.position
+      .clone()
+      .sub(walker.position);
 
-  target.y=0;
+  const distanceToPlayer=
+    direction.length();
+
+  direction.y=0;
 
   let speed=1.05;
 
@@ -3753,19 +4137,7 @@ function updateWalker(deltaTime){
     speed=2.65;
   }
 
-  const direction=
-    target
-      .clone()
-      .sub(walker.position);
-
-  const distanceToPlayer=
-    direction.length();
-
-  direction.y=0;
-
   if(direction.lengthSq()>.0001){
-    direction.normalize();
-
     moveWalkerWithCollisions(
       direction,
       speed,
@@ -3776,9 +4148,7 @@ function updateWalker(deltaTime){
   walker.lookAt(
     walker.position.x+
     walkerLastDirection.x,
-
     walker.position.y,
-
     walker.position.z+
     walkerLastDirection.z
   );
@@ -3799,7 +4169,23 @@ function updateWalker(deltaTime){
         :.72;
   }
 
-  if(distanceToPlayer<1.15){
+  if(distanceToPlayer<8){
+    walkerBreathTimer-=deltaTime;
+
+    if(walkerBreathTimer<=0){
+      playSound(
+        "Walker’s breath.mp3",
+        .5
+      );
+
+      walkerBreathTimer=3.2;
+    }
+  }
+
+  if(
+    distanceToPlayer<1.15&&
+    clearPathToPlayer()
+  ){
     attackPlayer();
   }
 }
@@ -3824,7 +4210,7 @@ function attackPlayer(){
 
   $("#jumpscareFx").classList.add("active");
 
-  setTimeout(()=>{
+  schedule(()=>{
     fadeTo(()=>{
       respawnPlayer();
 
@@ -3836,7 +4222,16 @@ function attackPlayer(){
 }
 
 function respawnPlayer(){
-  const spawn=findSafeSpawn();
+  let spawn=
+    new THREE.Vector3(
+      state.checkpoint.x,
+      eyeHeight,
+      state.checkpoint.z
+    );
+
+  if(collidesWithWall(spawn.x,spawn.z)){
+    spawn=findSafeSpawn();
+  }
 
   camera.position.copy(spawn);
 
@@ -3848,71 +4243,57 @@ function respawnPlayer(){
 
   stamina=100;
 
-  walker.position.set(
-    0,
-    0,
-    -16
-  );
+  const count=
+    state.modules.filter(Boolean).length;
 
-  saveGame();
+  walker.position.set(0,0,-16);
+
+  if(count>=4){
+    walker.visible=true;
+    walkerState="chase";
+    playWalkerAnimation("Chase");
+  }else if(count>=3){
+    walker.visible=true;
+    walkerState="search";
+    playWalkerAnimation("Chase");
+  }else if(count>=2){
+    walker.visible=true;
+    walkerState="walk";
+    playWalkerAnimation("Walk");
+  }else{
+    resetWalker();
+  }
+
+  saveProgress();
 }
 
 function updateBattery(deltaTime){
-  const flashlight=
-    camera.userData.flashlight;
-
-  if(flashlight.intensity>0){
-    state.battery=
-      Math.max(
-        0,
-        state.battery-
-        deltaTime*.72
-      );
-
-    if(state.battery<=0){
-      flashlight.intensity=0;
-
-      playSound(
-        "Lightof0.mp3",
-        .8
-      );
-
-      showToast("ФОНАРИК РАЗРЯЖЕН");
-    }
-  }
-}
-
-function updateDoor(deltaTime){
-  if(
-    doorOpenAmount>0&&
-    doorOpenAmount<1
-  ){
-    doorOpenAmount=
-      Math.min(
-        1,
-        doorOpenAmount+
-        deltaTime*.36
-      );
-
-    doorPivot.rotation.y=
-      -Math.PI*
-      .52*
-      doorOpenAmount;
+  if(!state.flashlightOn){
+    return;
   }
 
-  if(
-    doorOpenAmount>.78&&
-    camera.position.distanceTo(exitPosition)<2.8
-  ){
-    completeLevel();
+  state.battery=Math.max(
+    0,
+    state.battery-
+    deltaTime*.72
+  );
+
+  if(state.battery<=0){
+    state.flashlightOn=false;
+
+    camera.userData.flashlight.intensity=0;
+
+    playSound(
+      "Lightof0.mp3",
+      .8
+    );
+
+    showToast("ФОНАРИК РАЗРЯЖЕН");
   }
 }
 
 function updateLampFlicker(deltaTime){
-  if(
-    Math.random()>=
-    deltaTime*.018
-  ){
+  if(Math.random()>=deltaTime*.018){
     return;
   }
 
@@ -3943,7 +4324,7 @@ function updateLampFlicker(deltaTime){
     .18
   );
 
-  setTimeout(()=>{
+  schedule(()=>{
     if(!lamp.material){
       return;
     }
@@ -3956,6 +4337,21 @@ function updateLampFlicker(deltaTime){
   },160+Math.random()*380);
 }
 
+function checkLevelExit(){
+  if(
+    !state.doorOpen||
+    state.completed
+  ){
+    return;
+  }
+
+  if(
+    camera.position.distanceTo(exitPosition)<2.3
+  ){
+    completeLevel();
+  }
+}
+
 function completeLevel(){
   if(state.completed){
     return;
@@ -3964,7 +4360,7 @@ function completeLevel(){
   state.completed=true;
   playing=false;
 
-  saveGame();
+  saveProgress();
   stopAllAudio();
 
   $("#hud").classList.remove("active");
@@ -3977,8 +4373,7 @@ function completeLevel(){
   });
 }
 
-let lastAnimationTime=
-  performance.now();
+let lastAnimationTime=performance.now();
 
 function animate(time){
   requestAnimationFrame(animate);
@@ -4016,6 +4411,7 @@ function animate(time){
     updateWalker(deltaTime);
     updateDoor(deltaTime);
     updateLampFlicker(deltaTime);
+    checkLevelExit();
 
     if(walkerMixer){
       walkerMixer.update(deltaTime);
@@ -4030,10 +4426,25 @@ function animate(time){
 
 window.addEventListener("beforeunload",()=>{
   if(playing){
-    saveGame();
+    saveProgress();
   }
 
   stopAllAudio();
+});
+
+window.addEventListener("error",event=>{
+  console.error(
+    "Ошибка JavaScript:",
+    event.error||
+    event.message
+  );
+});
+
+window.addEventListener("unhandledrejection",event=>{
+  console.error(
+    "Необработанная ошибка:",
+    event.reason
+  );
 });
 </script>
 </body>
